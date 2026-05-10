@@ -1,0 +1,22 @@
+{
+  "name": "rennerdo30/lensman",
+  "description": "Generates responsive WebP/AVIF variants of uploaded images on the fly and serves them via <picture> + srcset so Lighthouse stops complaining about 4MB hero images.",
+  "type": "wordpress-plugin",
+  "license": "MIT",
+  "homepage": "https://github.com/rennerdo30/wp-lensman",
+  "authors": [
+    { "name": "Renner", "homepage": "https://renner.dev" }
+  ],
+  "require": {
+    "php": ">=8.1"
+  },
+  "autoload": {
+    "psr-4": { "Lensman\\": "src/" }
+  },
+  "scripts": {
+    "lint": "find . -path ./vendor -prune -o -name '*.php' -print -exec php -l {} ;"
+  },
+  "config": {
+    "sort-packages": true
+  }
+}
