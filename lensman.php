@@ -3,7 +3,7 @@
  * Plugin Name: Lensman
  * Plugin URI: https://github.com/rennerdo30/wp-lensman
  * Description: Auto-generates responsive WebP / AVIF variants of uploaded images, caches them on disk, and rewrites front-end <img> tags into <picture> + srcset so Lighthouse stops shaming you for 4MB hero photos. MIT.
- * Version: 0.1.0
+ * Version: 0.2.0
  * Author: renner.dev
  * Author URI: https://renner.dev
  * License: MIT
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('LENSMAN_VERSION', '0.1.0');
+define('LENSMAN_VERSION', '0.2.0');
 define('LENSMAN_FILE', __FILE__);
 define('LENSMAN_DIR', plugin_dir_path(__FILE__));
 define('LENSMAN_URL', plugin_dir_url(__FILE__));

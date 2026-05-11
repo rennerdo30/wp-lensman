@@ -8,21 +8,30 @@
 
 ## What it does
 
-1. **On upload** — hooks `wp_handle_upload` and:
+1. **On upload** — hooks `wp_handle_upload` **and** `add_attachment`:
    - Downscales the original to a sane maximum width (default 2400 px) so the WordPress media library never holds a 6000 px source.
    - Pre-generates the standard responsive widths (`320, 480, 768, 1024, 1440, 1920`) plus a WebP variant for each.
    - Optionally pre-generates AVIF variants where the runtime supports it.
+   - `add_attachment` catches `wp media import`, REST insertions, and theme seeders that bypass `wp_handle_upload`.
 
-2. **On render** — hooks `wp_get_attachment_image_attributes` and `the_content`:
+2. **On render** — hooks `wp_get_attachment_image_attributes`, `wp_get_attachment_image`, `the_content`, and `post_thumbnail_html`:
    - Picks the smallest cached variant that's still ≥ the requested width as the `src` fallback.
    - Emits a `srcset` listing every cached variant with `w` descriptors.
    - Adds a configurable default `sizes` attribute (`(max-width: 600px) 100vw, (max-width: 1200px) 50vw, 33vw`).
-   - Wraps the resulting `<img>` in a `<picture>` element with `<source type="image/avif">` and `<source type="image/webp">` ahead of it, so modern browsers pick the smaller format and old browsers keep working.
+   - Wraps the resulting `<img>` in a `<picture>` element with `<source type="image/avif">` and `<source type="image/webp">` ahead of it, so modern browsers pick the smaller format and old browsers keep working. This works for **both** `wp_get_attachment_image()`-rendered images (hero carousels, post thumbnails, ACF image fields) and content `<img>` tags.
    - Adds `loading="lazy"` and `decoding="async"` when missing.
 
-3. **Cache directory** — `wp-content/uploads/lensman/cache/<hash>/<width>.<ext>`, keyed by the source path + mtime. When a source is replaced in place, the hash changes and the old bucket becomes orphaned; a daily cron sweeps anything stale.
+3. **LCP preload hints** — when `wp_get_attachment_image()` is called with `fetchpriority="high"` in its attrs, Lensman captures the WebP `srcset` + `sizes` and:
+   - Emits `<link rel="preload" as="image" imagesrcset="…" imagesizes="…" fetchpriority="high">` at `wp_head` priority 1 for images rendered before `wp_head()` ran.
+   - Emits an HTTP `Link: <…>; rel=preload; as=image; imagesrcset=…; imagesizes=…` header as a fallback so images rendered later in the body still get a (best-effort) preload signal — only when headers have not been flushed yet.
+   - Bounded at 2 preloads per request (browsers throttle beyond that). First writer wins.
 
-4. **Concurrency-safe** — every variant write goes through a `flock`-guarded tempfile + atomic `rename`, so two simultaneous requests for the same uncached size don't corrupt each other.
+4. **Cache directory** — `wp-content/uploads/lensman/cache/<hash>/<width>.<ext>`, keyed by the source path + mtime. When a source is replaced in place, the hash changes and the old bucket becomes orphaned; a daily cron sweeps anything stale.
+   - Created with `0775` perms and best-effort `chgrp www-data` (or `apache` / `nginx` / `http`) so the webserver process can write into a cache that was originally created by a wp-cli `--allow-root` invocation.
+   - On boot, if the cache root is not writable by the current PHP process, Lensman registers an admin notice with the exact `chown` to run **and** disables `<picture>` emission for the rest of the request so no broken variant URLs ship in the HTML.
+   - Pre-created on activation, idempotent.
+
+5. **Concurrency-safe** — every variant write goes through a `flock`-guarded tempfile + atomic `rename`, so two simultaneous requests for the same uncached size don't corrupt each other.
 
 ## Install
 
@@ -104,6 +113,13 @@ Numbers will vary with content; the dominant cost on most WordPress sites is the
    └─────────────────────────────────────────┘
 ```
 
+## Roadmap (v0.3 deferred)
+
+- **Photo-PNG → JPEG conversion** at upload, behind an opt-in setting. When a PNG > 500 KB and > 800 px wide has no alpha channel, it is almost certainly a photograph that was saved as PNG by mistake — recompressing it as JPEG saves 70-90 % bandwidth. The risk is breaking attachment URLs that other code has cached; v0.2 deliberately keeps the master untouched and lets the `<picture>` WebP source carry the win instead.
+- **Output-buffer safety net** for `<picture>` rewrite that catches images injected by template-rendered (not filter-rendered) code paths.
+- **`lensman_picture($attachment_id, $args)` theme helper** for themes that want WebP-first markup outside of the `wp_get_attachment_image()` / `the_content` paths.
+- **WP-CLI command** (`wp lensman regenerate`, `wp lensman flush`, `wp lensman stats`).
+
 ## Known limitations
 
 - **No SVG, no GIF.** Vector and animated formats fall through untouched. (You don't want either of them as a `<picture>` source anyway.)
@@ -112,6 +128,7 @@ Numbers will vary with content; the dominant cost on most WordPress sites is the
 - **No EXIF orientation rewrite.** We strip metadata in cached variants for size, but we honour the source's EXIF orientation by passing it through Imagick's `getImageOrientation()` (GD has no equivalent, so GD-only servers may rotate landscape→portrait incorrectly; Imagick fixes this).
 - **No retina-density (`2x` / `3x`) markup.** We use `w` descriptors instead, which is the modern best practice and lets the browser pick based on viewport + DPR together. If your theme hardcodes `2x` srcsets, those will pass through untouched.
 - **Cache is not garbage-collected aggressively.** The daily cron deletes buckets untouched for 30 days. If you regenerate often, watch `wp-content/uploads/lensman/` size — or use the **Flush cache** button.
+- **LCP preload only fires for images rendered before `wp_head()` runs.** The HTTP `Link:` header fallback covers in-body renders, but only when `headers_sent() === false` at the time the `<picture>` is built — i.e., when no output has been flushed. Themes that flush output buffer early may miss the preload signal; in that case, render the hero image inside a `wp_head` callback (priority `< 1`) to guarantee it.
 
 ## Author
 
