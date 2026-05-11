@@ -47,9 +47,26 @@ final class Content
         if (strpos($html, '<img') === false) {
             return $html;
         }
+        // If the input already contains <picture> blocks (e.g. it was
+        // rendered by wp_get_attachment_image() which is now wrapped by
+        // Filters\AttachmentHtml), skip the inner <img> tags inside each
+        // existing <picture> so we never double-wrap.
+        $skipped = [];
+        if (stripos($html, '<picture') !== false) {
+            if (preg_match_all('/<picture\b[^>]*>.*?<\/picture>/is', $html, $blocks, PREG_OFFSET_CAPTURE)) {
+                foreach ($blocks[0] as $b) {
+                    if (preg_match('/<img\b[^>]*>/i', $b[0], $im)) {
+                        $skipped[$im[0]] = true;
+                    }
+                }
+            }
+        }
         return (string) preg_replace_callback(
             '/<img\b[^>]*>/i',
-            function (array $m): string {
+            function (array $m) use ($skipped): string {
+                if (isset($skipped[$m[0]])) {
+                    return $m[0];
+                }
                 return $this->rewrite_tag($m[0]);
             },
             $html
@@ -98,20 +115,7 @@ final class Content
             $tag = $this->insert_attr($tag, 'decoding', 'async');
         }
 
-        $sources = '';
-        if (!empty($desc['avif_srcset'])) {
-            $sources .= '<source type="image/avif" srcset="' . esc_attr($desc['avif_srcset'])
-                . '" sizes="' . esc_attr($desc['sizes']) . '">';
-        }
-        if (!empty($desc['webp_srcset'])) {
-            $sources .= '<source type="image/webp" srcset="' . esc_attr($desc['webp_srcset'])
-                . '" sizes="' . esc_attr($desc['sizes']) . '">';
-        }
-
-        if ($sources === '') {
-            return $tag;
-        }
-        return '<picture>' . $sources . $tag . '</picture>';
+        return $this->engine->build_picture_html($tag, $desc);
     }
 
     private function replace_attr(string $tag, string $attr, string $value): string
@@ -164,6 +168,24 @@ final class Content
             if (str_starts_with($clean, $bpath . '/')) {
                 $rel  = ltrim(substr($clean, strlen($bpath)), '/');
                 return $basedir . '/' . $rel;
+            }
+        }
+        // Host-mismatch fallback: an absolute URL on a different host
+        // (e.g. localhost:8080 in content authored on a dev box, served
+        // on prod through a reverse proxy) still resolves to a local
+        // file if its path lines up with the uploads dir. We confirm
+        // the file exists before accepting it so we never rewrite a
+        // truly remote image.
+        $parsed_clean = parse_url($clean);
+        if (is_array($parsed_clean) && !empty($parsed_clean['path'])) {
+            $parsed_base = parse_url($baseurl);
+            $bpath = $parsed_base['path'] ?? '/wp-content/uploads';
+            if (str_starts_with($parsed_clean['path'], $bpath . '/')) {
+                $rel  = ltrim(substr($parsed_clean['path'], strlen($bpath)), '/');
+                $path = $basedir . '/' . $rel;
+                if (is_file($path)) {
+                    return $path;
+                }
             }
         }
         return null;

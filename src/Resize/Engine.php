@@ -235,6 +235,39 @@ final class Engine
     }
 
     /**
+     * Wrap a single `<img …>` tag in a `<picture>` block containing
+     * `<source type="image/avif">` + `<source type="image/webp">` from
+     * the descriptor.  Returns the original tag if the descriptor does
+     * not carry any next-gen sources (nothing to gain from wrapping).
+     *
+     * Shared by Filters\Content (the_content rewrite) and
+     * Filters\AttachmentHtml (wp_get_attachment_image rewrite) so both
+     * surfaces produce identical markup.
+     *
+     * @param array{src:string,srcset:string,sizes:string,webp_srcset:?string,avif_srcset:?string,width:int,height:int} $desc
+     */
+    public function build_picture_html(string $img_tag, array $desc): string
+    {
+        // Defensive: never double-wrap.
+        if (stripos($img_tag, '<picture') !== false) {
+            return $img_tag;
+        }
+        $sources = '';
+        if (!empty($desc['avif_srcset'])) {
+            $sources .= '<source type="image/avif" srcset="' . esc_attr((string) $desc['avif_srcset'])
+                . '" sizes="' . esc_attr((string) $desc['sizes']) . '">';
+        }
+        if (!empty($desc['webp_srcset'])) {
+            $sources .= '<source type="image/webp" srcset="' . esc_attr((string) $desc['webp_srcset'])
+                . '" sizes="' . esc_attr((string) $desc['sizes']) . '">';
+        }
+        if ($sources === '') {
+            return $img_tag;
+        }
+        return '<picture>' . $sources . $img_tag . '</picture>';
+    }
+
+    /**
      * @param int[] $widths
      */
     private function build_srcset(string $source_path, array $widths, string $ext): string
