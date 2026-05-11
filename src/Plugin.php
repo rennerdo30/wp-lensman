@@ -6,6 +6,7 @@ namespace Lensman;
 
 use Lensman\Admin\SettingsPage;
 use Lensman\Cron\CacheSweep;
+use Lensman\Filters\AttachmentHtml;
 use Lensman\Filters\AttachmentImage;
 use Lensman\Filters\Content;
 use Lensman\Filters\Picture;
@@ -47,18 +48,66 @@ final class Plugin
         $cache    = new Cache();
         $engine   = new Engine($settings, $cache);
 
+        // Check once per request whether the cache root is writable.
+        // When it is not, we register an admin notice AND short-circuit
+        // <picture> emission so we never ship HTML pointing at variant
+        // URLs that 404. Internal cache::root() ensures the dir exists
+        // and tries to self-heal permissions.
+        $cache_writable = $cache->is_writable_or_warn();
+
         // Upload pipeline — generate variants the moment a JPEG/PNG lands
         // in the media library so the front-end rewrite has cache hits
         // from the very first render.
-        add_filter('wp_handle_upload', static function (array $upload) use ($engine) {
-            $engine->on_upload($upload);
+        add_filter('wp_handle_upload', static function (array $upload) use ($engine, $cache_writable) {
+            if ($cache_writable) {
+                $engine->on_upload($upload);
+            }
             return $upload;
+        }, 20);
+
+        // wp_handle_upload only fires for user-driven uploads through
+        // the media UI. `wp media import`, REST attachment inserts and
+        // the EUPD seeder all reach wp_insert_attachment without ever
+        // touching wp_handle_upload, leaving variants unprimed. Hooking
+        // add_attachment here closes that gap.
+        add_action('add_attachment', static function ($attachment_id) use ($engine, $cache_writable): void {
+            if (!$cache_writable) {
+                return;
+            }
+            $path = get_attached_file((int) $attachment_id);
+            $mime = get_post_mime_type((int) $attachment_id);
+            if (!is_string($path) || !is_file($path)) {
+                return;
+            }
+            // Guard against re-entry. The on_upload pipeline can call
+            // wp_update_attachment_metadata which in some plugin stacks
+            // re-fires add_attachment, and we do not want to recurse.
+            static $in_progress = [];
+            $key = (int) $attachment_id;
+            if (isset($in_progress[$key])) {
+                return;
+            }
+            $in_progress[$key] = true;
+            try {
+                $engine->on_upload([
+                    'file' => $path,
+                    'url'  => (string) wp_get_attachment_url((int) $attachment_id),
+                    'type' => (string) ($mime ?: ''),
+                ]);
+            } finally {
+                unset($in_progress[$key]);
+            }
         }, 20);
 
         // Front-end rewrites.
         (new AttachmentImage($engine, $settings))->register();
+        (new AttachmentHtml($engine, $settings, $cache_writable))->register();
         (new Content($engine, $settings))->register();
         (new Picture())->register(); // currently a passive helper; reserved for future <picture> emission
+
+        // LCP preload hints — emitted at wp_head priority 1 so the
+        // browser can start the LCP fetch before parsing the carousel.
+        add_action('wp_head', [AttachmentHtml::class, 'emit_preloads'], 1);
 
         // Cron + cache maintenance.
         (new CacheSweep($cache))->register();
@@ -78,6 +127,15 @@ final class Plugin
         if (false === get_option(self::OPTION_KEY)) {
             add_option(self::OPTION_KEY, self::DEFAULTS);
         }
+
+        // Pre-create the cache dir on activation so we never hit the
+        // "first variant write races against directory creation while
+        // running as root in wp-cli" trap that produced the v0.1
+        // permission bug.
+        $cache = new Cache();
+        $root  = $cache->root();
+        $cache->ensure_dir($root['path']);
+        $cache->ensure_dir($root['path'] . '/cache');
 
         if (!wp_next_scheduled(self::CRON_SWEEP_HOOK)) {
             wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CRON_SWEEP_HOOK);
